@@ -21,42 +21,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Config – edit these to match YOUR model ──────────────────────────────────
-MODEL_PATH   = os.getenv("MODEL_PATH", "model.h5")   # path to your .h5/.keras file
-IMG_SIZE     = int(os.getenv("IMG_SIZE", "224"))      # resize target (e.g. 224 for typical CNNs)
-CLASS_NAMES  = os.getenv("CLASS_NAMES", "no_tumor,tumor").split(",")
-                                                       # update with your actual class names
+# ── Config ───────────────────────────────────────────────────────────────────
+MODEL_PATH  = os.getenv("MODEL_PATH", "model.h5")
+IMG_SIZE    = int(os.getenv("IMG_SIZE", "128"))
+CLASS_NAMES = os.getenv("CLASS_NAMES", "no_tumor,tumor").split(",")
 
 # ── Load model once at startup ───────────────────────────────────────────────
-model: tf.keras.Model | None = None
+model = None
 
 @app.on_event("startup")
 def load_model():
     global model
     if not os.path.exists(MODEL_PATH):
-        print(f"⚠️  Model file not found at '{MODEL_PATH}'. "
-              "Place your model file next to main.py or set MODEL_PATH env var.")
+        print(f"⚠️  Model file not found at '{MODEL_PATH}'.")
         return
-    model = tf.keras.models.load_model(MODEL_PATH)
-    print(f"✅ Model loaded from {MODEL_PATH}")
-    print(f"   Input shape : {model.input_shape}")
-    print(f"   Output shape: {model.output_shape}")
-
+    try:
+        # compile=False fixes most Keras version compatibility issues
+        model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+        print(f"✅ Model loaded from {MODEL_PATH}")
+        print(f"   Input shape : {model.input_shape}")
+        print(f"   Output shape: {model.output_shape}")
+    except Exception as e:
+        print(f"❌ Failed to load model: {e}")
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 def preprocess(image_bytes: bytes) -> np.ndarray:
-    """Convert raw image bytes → normalised NumPy array ready for inference."""
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     img = img.resize((IMG_SIZE, IMG_SIZE))
-    arr = np.array(img, dtype=np.float32) / 255.0   # [0, 1] normalisation
-    return np.expand_dims(arr, axis=0)               # add batch dim → (1, H, W, 3)
-
+    arr = np.array(img, dtype=np.float32) / 255.0
+    return np.expand_dims(arr, axis=0)
 
 # ── Routes ───────────────────────────────────────────────────────────────────
 @app.get("/", tags=["Health"])
 def root():
     return {"status": "ok", "message": "Brain Tumor Detection API is running 🧠"}
-
 
 @app.get("/health", tags=["Health"])
 def health():
@@ -67,26 +65,13 @@ def health():
         "img_size": IMG_SIZE,
     }
 
-
 @app.post("/predict", tags=["Inference"])
 async def predict(file: UploadFile = File(...)):
-    """
-    Upload an MRI image (JPEG / PNG) and receive a prediction.
-
-    Returns:
-    - **predicted_class**: the most likely class label
-    - **confidence**: probability for the predicted class (0–1)
-    - **probabilities**: probability for every class
-    """
     if model is None:
         raise HTTPException(status_code=503, detail="Model is not loaded yet.")
 
-    # Validate file type
     if file.content_type not in ("image/jpeg", "image/png", "image/jpg"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type '{file.content_type}'. Send JPEG or PNG.",
-        )
+        raise HTTPException(status_code=400, detail=f"Unsupported file type '{file.content_type}'. Send JPEG or PNG.")
 
     image_bytes = await file.read()
     if len(image_bytes) == 0:
@@ -97,10 +82,8 @@ async def predict(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Could not process image: {e}")
 
-    # Run inference
-    preds = model.predict(tensor, verbose=0)[0]          # shape: (num_classes,)
+    preds = model.predict(tensor, verbose=0)[0]
 
-    # Handle binary sigmoid output (single neuron)
     if len(preds) == 1:
         prob_tumor = float(preds[0])
         probabilities = {CLASS_NAMES[0]: round(1 - prob_tumor, 4),
@@ -108,10 +91,7 @@ async def predict(file: UploadFile = File(...)):
         predicted_class = CLASS_NAMES[1] if prob_tumor >= 0.5 else CLASS_NAMES[0]
         confidence = prob_tumor if prob_tumor >= 0.5 else 1 - prob_tumor
     else:
-        # Softmax multi-class output
-        probabilities = {
-            cls: round(float(p), 4) for cls, p in zip(CLASS_NAMES, preds)
-        }
+        probabilities = {cls: round(float(p), 4) for cls, p in zip(CLASS_NAMES, preds)}
         predicted_idx   = int(np.argmax(preds))
         predicted_class = CLASS_NAMES[predicted_idx]
         confidence      = float(preds[predicted_idx])
