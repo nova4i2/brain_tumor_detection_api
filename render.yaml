@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: brain-tumor-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: MODEL_PATH
+        value: model.h5          # filename of your model inside the repo
+      - key: IMG_SIZE
+        value: "128"             # change if your model uses a different input size
+      - key: CLASS_NAMES
+        value: "glioma,meningioma,notumor,pituitary"  # comma-separated, match your training labels exactly
+    plan: free
